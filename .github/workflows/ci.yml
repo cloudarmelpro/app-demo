@@ -106,7 +106,9 @@ jobs:
 
       - name: Mise à jour de l'étiquette en dev (EKS) et sur la démonstration (OVH)
         run: |
-          (cd apps/app-demo/overlays/dev && kustomize edit set image app-demo=${{ vars.ECR_REPOSITORY_URL }}:${{ needs.image.outputs.tag }})
+          if [ -n "${{ vars.ECR_REPOSITORY_URL }}" ]; then
+            (cd apps/app-demo/overlays/dev && kustomize edit set image app-demo=${{ vars.ECR_REPOSITORY_URL }}:${{ needs.image.outputs.tag }})
+          fi
           (cd apps/app-demo/overlays/ovh && kustomize edit set image app-demo=${{ needs.image.outputs.ghcr }}:${{ needs.image.outputs.tag }})
 
       - name: Commit et push
