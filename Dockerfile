@@ -7,6 +7,8 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # Étape 2 : image finale, sans outils de compilation
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+# Correctifs de sécurité Debian publiés après l'image de base (Trivy bloque sinon les failles déjà corrigées)
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
 # Utilisateur sans privilège, déclaré par son numéro (exigé par runAsNonRoot)
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin appuser
 WORKDIR /app
