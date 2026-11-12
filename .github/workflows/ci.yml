@@ -1,0 +1,117 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: eu-west-3
+
+jobs:
+  analyses-code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Recherche de secrets (Gitleaks)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Analyse statique du code (Semgrep)
+        run: |
+          pipx install semgrep
+          semgrep scan --config p/python --config p/dockerfile --config .semgrep/ --error
+
+      - name: Dépendances vulnérables (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+  image:
+    needs: analyses-code
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      packages: write            # publication du miroir GHCR (démonstration OVH)
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      ghcr: ${{ steps.meta.outputs.ghcr }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: meta
+        run: |
+          echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "ghcr=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/app-demo" >> "$GITHUB_OUTPUT"
+
+      - name: Construction de l'image
+        run: docker build -t "app-demo:${{ steps.meta.outputs.tag }}" .
+
+      - name: Vulnérabilités de l'image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: app-demo:${{ steps.meta.outputs.tag }}
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Publication du miroir GHCR (démonstration OVH)
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "app-demo:${{ steps.meta.outputs.tag }}" "${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}"
+          docker push "${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}"
+
+      # Les étapes AWS sont ignorées si la variable AWS_ROLE_ARN est vide (compte AWS indisponible)
+      - name: Connexion à AWS par OIDC
+        if: github.event_name == 'push' && vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Connexion à ECR
+        if: github.event_name == 'push' && vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+
+      - name: Publication de l'image dans ECR
+        if: github.event_name == 'push' && vars.AWS_ROLE_ARN != ''
+        run: |
+          docker tag "app-demo:${{ steps.meta.outputs.tag }}" "${{ vars.ECR_REPOSITORY_URL }}:${{ steps.meta.outputs.tag }}"
+          docker push "${{ vars.ECR_REPOSITORY_URL }}:${{ steps.meta.outputs.tag }}"
+
+  maj-gitops:
+    needs: image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: cloudarmelpro/gitops-config
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+      - name: Mise à jour de l'étiquette en dev (EKS) et sur la démonstration (OVH)
+        run: |
+          (cd apps/app-demo/overlays/dev && kustomize edit set image app-demo=${{ vars.ECR_REPOSITORY_URL }}:${{ needs.image.outputs.tag }})
+          (cd apps/app-demo/overlays/ovh && kustomize edit set image app-demo=${{ needs.image.outputs.ghcr }}:${{ needs.image.outputs.tag }})
+
+      - name: Commit et push
+        run: |
+          git config user.name  "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git commit -am "deploy(dev): app-demo ${{ needs.image.outputs.tag }}"
+          git push
