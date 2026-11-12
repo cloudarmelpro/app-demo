@@ -44,17 +44,14 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      packages: write            # publication du miroir GHCR (démonstration OVH)
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
-      ghcr: ${{ steps.meta.outputs.ghcr }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - id: meta
         run: |
           echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "ghcr=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/app-demo" >> "$GITHUB_OUTPUT"
 
       - name: Construction de l'image
         run: docker build -t "app-demo:${{ steps.meta.outputs.tag }}" .
@@ -67,29 +64,19 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
-      - name: Publication du miroir GHCR (démonstration OVH)
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker tag "app-demo:${{ steps.meta.outputs.tag }}" "${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}"
-          docker push "${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}"
-
-      # Les étapes AWS sont ignorées si la variable AWS_ROLE_ARN est vide (compte AWS indisponible)
       - name: Connexion à AWS par OIDC
-        if: github.event_name == 'push' && vars.AWS_ROLE_ARN != ''
+        if: github.event_name == 'push'
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Connexion à ECR
-        if: github.event_name == 'push' && vars.AWS_ROLE_ARN != ''
+        if: github.event_name == 'push'
         uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
 
       - name: Publication de l'image dans ECR
-        if: github.event_name == 'push' && vars.AWS_ROLE_ARN != ''
+        if: github.event_name == 'push'
         run: |
           docker tag "app-demo:${{ steps.meta.outputs.tag }}" "${{ vars.ECR_REPOSITORY_URL }}:${{ steps.meta.outputs.tag }}"
           docker push "${{ vars.ECR_REPOSITORY_URL }}:${{ steps.meta.outputs.tag }}"
@@ -104,12 +91,10 @@ jobs:
           repository: cloudarmelpro/gitops-config
           token: ${{ secrets.GITOPS_TOKEN }}
 
-      - name: Mise à jour de l'étiquette en dev (EKS) et sur la démonstration (OVH)
+      - name: Mise à jour de l'étiquette en dev
         run: |
-          if [ -n "${{ vars.ECR_REPOSITORY_URL }}" ]; then
-            (cd apps/app-demo/overlays/dev && kustomize edit set image app-demo=${{ vars.ECR_REPOSITORY_URL }}:${{ needs.image.outputs.tag }})
-          fi
-          (cd apps/app-demo/overlays/ovh && kustomize edit set image app-demo=${{ needs.image.outputs.ghcr }}:${{ needs.image.outputs.tag }})
+          cd apps/app-demo/overlays/dev
+          kustomize edit set image app-demo=${{ vars.ECR_REPOSITORY_URL }}:${{ needs.image.outputs.tag }}
 
       - name: Commit et push
         run: |
